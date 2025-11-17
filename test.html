@@ -1,0 +1,439 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Eye Tracking Fullscreen</title>
+    <script src="face-api.js"></script>
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        width: 100%;
+        height: 100%;
+        margin: 0;
+        padding: 0;
+        font-family: Arial, sans-serif;
+        background-color: #000;
+        overflow: hidden;
+      }
+
+      .video-container {
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100vw;
+        height: 100vh;
+        margin: 0;
+        padding: 0;
+      }
+
+      video {
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        margin: 0;
+        padding: 0;
+      }
+
+      canvas {
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        pointer-events: none;
+        z-index: 10;
+      }
+
+      .controls {
+        position: fixed;
+        bottom: 20px;
+        left: 50%;
+        transform: translateX(-50%);
+        z-index: 1000;
+        background: rgba(0, 0, 0, 0.7);
+        padding: 15px 25px;
+        border-radius: 10px;
+      }
+
+      .controls button {
+        margin: 0 5px;
+        padding: 10px 20px;
+        font-size: 14px;
+        border: none;
+        border-radius: 5px;
+        cursor: pointer;
+        background: #4caf50;
+        color: white;
+      }
+
+      .controls button:hover {
+        background: #45a049;
+      }
+
+      .controls button:disabled {
+        background: #ccc;
+        cursor: not-allowed;
+      }
+
+      .status {
+        position: fixed;
+        top: 10px;
+        left: 10px;
+        padding: 10px;
+        background: rgba(232, 245, 232, 0.9);
+        border-radius: 5px;
+        border: 1px solid #4caf50;
+        z-index: 1000;
+        color: #000;
+        font-size: 14px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="video-container">
+      <video
+        id="inputVideo"
+        autoplay
+        muted
+        playsinline
+        onloadedmetadata="onPlay(this)"
+      ></video>
+      <canvas id="overlay"></canvas>
+    </div>
+
+    <div class="controls">
+      <button id="startBtn" onclick="startDetection()">Start Detection</button>
+      <button id="stopBtn" onclick="stopDetection()" disabled>
+        Stop Detection
+      </button>
+    </div>
+
+    <div class="status" id="status">Status: Ready to start</div>
+
+    <script>
+      let isDetecting = false;
+      let forwardTimes = [];
+
+      // Logging function - console only
+      function log(message, type = "info") {
+        const timestamp = new Date().toLocaleTimeString();
+        console.log(`[${timestamp}] ${message}`);
+      }
+
+      function updateStatus(message) {
+        document.getElementById("status").textContent = `Status: ${message}`;
+      }
+
+      function updateTimeStats(timeInMs) {
+        forwardTimes = [timeInMs].concat(forwardTimes).slice(0, 30);
+        const avgTimeInMs =
+          forwardTimes.reduce((total, t) => total + t) / forwardTimes.length;
+        const fps = Math.round(1000 / avgTimeInMs);
+        log(
+          `Processing time: ${Math.round(avgTimeInMs)}ms, FPS: ${fps}`,
+          "info"
+        );
+      }
+
+      // Function to extract and log eye positions
+      function extractEyePositions(landmarks) {
+        if (landmarks) {
+          const leftEye = landmarks.getLeftEye();
+          const rightEye = landmarks.getRightEye();
+
+          // Calculate eye centers
+          const leftEyeCenter = faceapi.utils.getCenterPoint(leftEye);
+          const rightEyeCenter = faceapi.utils.getCenterPoint(rightEye);
+
+          // Log coordinate range info (only first time)
+          if (!extractEyePositions.loggedRange) {
+            console.log("=== COORDINATE SYSTEM INFO ===");
+            const videoEl = document.getElementById("inputVideo");
+            const canvas = document.getElementById("overlay");
+            console.log(
+              `Video element size: ${videoEl.offsetWidth} x ${videoEl.offsetHeight}`
+            );
+            console.log(`Canvas size: ${canvas.width} x ${canvas.height}`);
+            console.log(`X coordinate range: 0 to ${canvas.width}`);
+            console.log(`Y coordinate range: 0 to ${canvas.height}`);
+            console.log("=== COORDINATE SYSTEM INFO ===");
+            extractEyePositions.loggedRange = true;
+          }
+
+          log(
+            `Left Eye Center: (${Math.round(leftEyeCenter.x)}, ${Math.round(
+              leftEyeCenter.y
+            )})`,
+            "success"
+          );
+          log(
+            `Right Eye Center: (${Math.round(rightEyeCenter.x)}, ${Math.round(
+              rightEyeCenter.y
+            )})`,
+            "success"
+          );
+
+          // Log individual eye points
+          leftEye.forEach((point, index) => {
+            log(
+              `Left Eye Point ${index}: (${Math.round(point.x)}, ${Math.round(
+                point.y
+              )})`,
+              "info"
+            );
+          });
+
+          rightEye.forEach((point, index) => {
+            log(
+              `Right Eye Point ${index}: (${Math.round(point.x)}, ${Math.round(
+                point.y
+              )})`,
+              "info"
+            );
+          });
+
+          // Calculate eye distance
+          const eyeDistance = faceapi.utils.euclideanDistance(
+            leftEyeCenter,
+            rightEyeCenter
+          );
+          log(`Eye Distance: ${Math.round(eyeDistance)} pixels`, "info");
+
+          return {
+            leftEye,
+            rightEye,
+            leftEyeCenter,
+            rightEyeCenter,
+            eyeDistance,
+          };
+        }
+        return null;
+      }
+
+      // Function to draw eye positions on canvas
+      function drawEyePositions(canvas, landmarks) {
+        const ctx = canvas.getContext("2d");
+
+        const leftEye = landmarks.getLeftEye();
+        const rightEye = landmarks.getRightEye();
+
+        // Debug: Log the first point of each eye
+        if (leftEye.length > 0 && rightEye.length > 0) {
+          console.log("Canvas size:", canvas.width, "x", canvas.height);
+          console.log("Left eye first point:", leftEye[0].x, ",", leftEye[0].y);
+          console.log(
+            "Right eye first point:",
+            rightEye[0].x,
+            ",",
+            rightEye[0].y
+          );
+        }
+
+        // Draw left eye points (green) - larger for fullscreen
+        ctx.fillStyle = "#00ff00";
+        leftEye.forEach((point, index) => {
+          ctx.beginPath();
+          ctx.arc(point.x, point.y, 8, 0, 2 * Math.PI);
+          ctx.fill();
+        });
+
+        // Draw right eye points (red) - larger for fullscreen
+        ctx.fillStyle = "#ff0000";
+        rightEye.forEach((point, index) => {
+          ctx.beginPath();
+          ctx.arc(point.x, point.y, 8, 0, 2 * Math.PI);
+          ctx.fill();
+        });
+
+        // Draw eye centers (blue) - much larger for fullscreen
+        const leftEyeCenter = faceapi.utils.getCenterPoint(leftEye);
+        const rightEyeCenter = faceapi.utils.getCenterPoint(rightEye);
+
+        ctx.fillStyle = "#0000ff";
+        ctx.beginPath();
+        ctx.arc(leftEyeCenter.x, leftEyeCenter.y, 12, 0, 2 * Math.PI);
+        ctx.fill();
+
+        ctx.beginPath();
+        ctx.arc(rightEyeCenter.x, rightEyeCenter.y, 12, 0, 2 * Math.PI);
+        ctx.fill();
+
+        // Draw coordinate labels above eye centers
+        ctx.fillStyle = "#ffffff";
+        ctx.font = "bold 20px Arial";
+        ctx.textAlign = "center";
+
+        // Left eye label
+        ctx.fillText(
+          `(${Math.round(leftEyeCenter.x)}, ${Math.round(leftEyeCenter.y)})`,
+          leftEyeCenter.x,
+          leftEyeCenter.y - 20
+        );
+
+        // Right eye label
+        ctx.fillText(
+          `(${Math.round(rightEyeCenter.x)}, ${Math.round(rightEyeCenter.y)})`,
+          rightEyeCenter.x,
+          rightEyeCenter.y - 20
+        );
+
+        // Draw eye distance line (yellow) - thicker for fullscreen
+        ctx.strokeStyle = "#ffff00";
+        ctx.lineWidth = 4;
+        ctx.beginPath();
+        ctx.moveTo(leftEyeCenter.x, leftEyeCenter.y);
+        ctx.lineTo(rightEyeCenter.x, rightEyeCenter.y);
+        ctx.stroke();
+
+        // Draw eye distance label in the middle of the line
+        const midX = (leftEyeCenter.x + rightEyeCenter.x) / 2;
+        const midY = (leftEyeCenter.y + rightEyeCenter.y) / 2;
+        const eyeDistance = faceapi.utils.euclideanDistance(
+          leftEyeCenter,
+          rightEyeCenter
+        );
+
+        ctx.fillStyle = "#ffff00";
+        ctx.font = "bold 18px Arial";
+        ctx.fillText(`${Math.round(eyeDistance)}px`, midX, midY - 10);
+      }
+
+      async function onPlay(videoEl) {
+        if (videoEl.paused || videoEl.ended || !isDetecting) {
+          return setTimeout(() => onPlay(videoEl));
+        }
+
+        try {
+          const options = new faceapi.TinyFaceDetectorOptions({
+            inputSize: 320,
+            scoreThreshold: 0.5,
+          });
+          const ts = Date.now();
+
+          // Detect face with landmarks - pass true to use tiny landmark model
+          const result = await faceapi
+            .detectSingleFace(videoEl, options)
+            .withFaceLandmarks(true);
+
+          updateTimeStats(Date.now() - ts);
+
+          if (result) {
+            const canvas = document.getElementById("overlay");
+
+            // Set canvas to match video display dimensions
+            canvas.width = videoEl.offsetWidth;
+            canvas.height = videoEl.offsetHeight;
+
+            // Match dimensions (now with already-sized canvas)
+            const dims = faceapi.matchDimensions(canvas, videoEl, true);
+
+            // Resize results to match canvas
+            const resizedResult = faceapi.resizeResults(result, dims);
+
+            // Clear canvas first
+            const ctx = canvas.getContext("2d");
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            // Only draw eye positions
+            drawEyePositions(canvas, resizedResult.landmarks);
+
+            // Extract and log eye positions (use original landmarks for accurate coordinates)
+            extractEyePositions(result.landmarks);
+
+            log("Face detected - eyes tracked", "success");
+          } else {
+            // Clear canvas when no face detected
+            const canvas = document.getElementById("overlay");
+            const ctx = canvas.getContext("2d");
+            if (canvas.width && canvas.height) {
+              ctx.clearRect(0, 0, canvas.width, canvas.height);
+            }
+            log("No face detected", "info");
+          }
+        } catch (error) {
+          log(`Detection error: ${error.message}`, "error");
+        }
+
+        setTimeout(() => onPlay(videoEl));
+      }
+
+      async function startDetection() {
+        try {
+          updateStatus("Loading models...");
+          log("Loading face detection models...", "info");
+
+          // Load Tiny Face Detector for faster performance
+          await faceapi.loadTinyFaceDetectorModel("/");
+          log("Tiny Face Detection model loaded", "success");
+
+          // Load tiny face landmark model for better performance
+          await faceapi.loadFaceLandmarkTinyModel("/");
+          log("Tiny Face Landmark model loaded", "success");
+
+          // Get user media with higher quality settings
+          updateStatus("Requesting camera access...");
+          const stream = await navigator.mediaDevices.getUserMedia({
+            video: {
+              width: { ideal: 1280 },
+              height: { ideal: 720 },
+              frameRate: { ideal: 30 },
+              facingMode: "user",
+            },
+          });
+
+          const videoEl = document.getElementById("inputVideo");
+          videoEl.srcObject = stream;
+
+          updateStatus("Detection active");
+          log("Camera started, detection active", "success");
+
+          // Start detection loop
+          isDetecting = true;
+
+          document.getElementById("startBtn").disabled = true;
+          document.getElementById("stopBtn").disabled = false;
+        } catch (error) {
+          updateStatus("Error starting detection");
+          log(`Error: ${error.message}`, "error");
+          console.error("Error starting detection:", error);
+        }
+      }
+
+      function stopDetection() {
+        isDetecting = false;
+
+        const videoEl = document.getElementById("inputVideo");
+        if (videoEl.srcObject) {
+          const tracks = videoEl.srcObject.getTracks();
+          tracks.forEach((track) => track.stop());
+          videoEl.srcObject = null;
+        }
+
+        // Clear canvas
+        const canvas = document.getElementById("overlay");
+        const ctx = canvas.getContext("2d");
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+        updateStatus("Detection stopped");
+        log("Detection stopped", "info");
+
+        document.getElementById("startBtn").disabled = false;
+        document.getElementById("stopBtn").disabled = true;
+      }
+
+      // Initialize on page load
+      window.onload = () => {
+        log("Page loaded, ready to start detection", "info");
+      };
+    </script>
+  </body>
+</html>
