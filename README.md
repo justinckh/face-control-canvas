@@ -69,8 +69,121 @@ The application is organized into modular services:
 3. Detection loop runs, processing each frame:
    - Detects face and landmarks
    - Extracts eye positions
+   - Applies signal processing filters (low pass and deadzone)
    - Renders visual overlays on canvas
    - Logs coordinates and performance metrics
+
+### Signal Processing: Low Pass Filters and Deadzone
+
+The application uses sophisticated signal processing techniques to smooth and stabilize eye tracking data before it's used to control the camera. This prevents jittery movements and creates a more natural, responsive experience.
+
+#### Low Pass Filters
+
+Low pass filters are used to smooth out rapid fluctuations in eye position and distance measurements. They apply exponential moving averages to reduce noise while maintaining responsiveness.
+
+**Location**: `src/components/FaceDetectionOverlay.jsx` (lines 3-51)
+
+**SmoothZoom Class** (lines 4-23):
+
+- **Purpose**: Smooths eye distance measurements (used for zoom control)
+- **Alpha value**: `0.1` (default, configurable in constructor)
+  - Lower values (e.g., `0.05`) = smoother, more lag
+  - Higher values (e.g., `0.2`) = more responsive, less smooth
+- **Formula**: `smoothed = previous * (1 - alpha) + current * alpha`
+- **Initialization**: On first update, directly uses the raw value
+- **Usage**: Applied to normalized eye distance (0-1 range) before deadzone filtering
+
+**SmoothPosition Class** (lines 25-51):
+
+- **Purpose**: Smooths eye position coordinates (x, y) for camera movement
+- **Alpha value**: `0.1` (default, configurable in constructor)
+- **Formula**: Applied separately to x and y coordinates:
+  - `smoothed.x = previous.x * (1 - alpha) + current.x * alpha`
+  - `smoothed.y = previous.y * (1 - alpha) + current.y * alpha`
+- **Initialization**: On first update, directly uses the raw position
+- **Usage**: Applied to normalized eye position (-1 to 1 range) before deadzone filtering
+
+**Implementation Details**:
+
+- Both filters are instantiated in `FaceDetectionOverlay` component (lines 95-96)
+- Filters maintain internal state (`smoothedDistance` or `smoothedPosition`)
+- Filters can be reset when face detection stops (lines 370-371, 418)
+- The alpha value of `0.1` provides a good balance between smoothness and responsiveness
+
+#### Deadzone Filters
+
+Deadzone filters prevent micro-movements from triggering camera updates. They only allow updates when the change exceeds a minimum threshold, reducing unnecessary processing and eliminating jitter from small detection variations.
+
+**Location**: `src/components/FaceDetectionOverlay.jsx` (lines 53-76)
+
+**applyDeadzone Function** (lines 54-63):
+
+- **Purpose**: Filters scalar values (used for eye distance)
+- **Parameters**:
+  - `current`: Current value to check
+  - `previous`: Previous filtered value
+  - `threshold`: Minimum change required to update
+- **Logic**:
+  - If change < threshold: returns previous value (no update)
+  - If change >= threshold: returns current value (allows update)
+  - On first call (no previous): always returns current value
+- **Threshold**: `0.001` for normalized distance (line 99)
+  - This means distance must change by at least 0.001 (0.1%) to trigger an update
+
+**applyPositionDeadzone Function** (lines 65-76):
+
+- **Purpose**: Filters position objects with x and y coordinates
+- **Parameters**:
+  - `current`: Current position object `{x, y}`
+  - `previous`: Previous filtered position object
+  - `threshold`: Minimum change required in either axis
+- **Logic**:
+  - Calculates delta for both x and y axes
+  - If both deltas < threshold: returns previous value (no update)
+  - If either delta >= threshold: returns current value (allows update)
+  - On first call (no previous): always returns current value
+- **Threshold**: `0.005` for normalized position (line 100)
+  - This means position must change by at least 0.005 (0.5%) in x or y to trigger an update
+
+#### Signal Processing Pipeline
+
+The complete filtering pipeline processes raw detection data through multiple stages:
+
+**For Eye Position** (`updateEyePosition` function, lines 385-413):
+
+```
+1. Raw Detection → Normalize coordinates to [-1, 1] range
+2. Low Pass Filter → SmoothPosition.update() applies exponential moving average
+3. Deadzone Filter → applyPositionDeadzone() checks if change exceeds threshold
+4. Store Result → Update lastEyePositionRef for next comparison
+5. Callback → onEyePositionChange() sends filtered value to App component
+```
+
+**For Eye Distance** (`updateEyeDistance` function, lines 415-443):
+
+```
+1. Raw Detection → Normalized distance (0-1 range)
+2. Low Pass Filter → SmoothZoom.update() applies exponential moving average
+3. Deadzone Filter → applyDeadzone() checks if change exceeds threshold
+4. Store Result → Update lastEyeDistanceRef for next comparison
+5. Callback → onEyeDistanceChange() sends filtered value to App component
+```
+
+**Key Benefits**:
+
+- **Reduced jitter**: Low pass filters smooth out rapid fluctuations
+- **Noise reduction**: Deadzone filters ignore micro-movements
+- **Performance**: Fewer unnecessary updates reduce processing overhead
+- **Natural feel**: Combined filters create smooth, responsive camera movement
+- **Stability**: Prevents camera from shaking when user holds head still
+
+**Configuration**:
+
+- Low pass alpha values: Set in constructor (default `0.1`)
+- Deadzone thresholds: Defined as constants (lines 99-100)
+  - `distanceDeadzoneThreshold = 0.001`
+  - `positionDeadzoneThreshold = 0.005`
+- These values can be adjusted to tune responsiveness vs. stability
 
 ### Camera Control Parameters
 

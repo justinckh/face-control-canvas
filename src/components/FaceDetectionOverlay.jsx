@@ -1,6 +1,84 @@
 import { useEffect, useRef, useState } from "react";
 
-export default function FaceDetectionOverlay({ onEyePositionChange }) {
+// Low pass filter for smoothing values
+class SmoothZoom {
+  constructor(alpha = 0.1) {
+    this.smoothedDistance = null;
+    this.alpha = alpha; // 0.05 very smooth, 0.2 more responsive
+  }
+
+  update(rawDistance) {
+    if (this.smoothedDistance === null) {
+      this.smoothedDistance = rawDistance;
+    } else {
+      this.smoothedDistance =
+        this.smoothedDistance * (1 - this.alpha) + rawDistance * this.alpha;
+    }
+    return this.smoothedDistance;
+  }
+
+  reset() {
+    this.smoothedDistance = null;
+  }
+}
+
+// Low pass filter for smoothing position (x, y)
+class SmoothPosition {
+  constructor(alpha = 0.1) {
+    this.smoothedPosition = null;
+    this.alpha = alpha;
+  }
+
+  update(rawPosition) {
+    if (this.smoothedPosition === null) {
+      this.smoothedPosition = { x: rawPosition.x, y: rawPosition.y };
+    } else {
+      this.smoothedPosition = {
+        x:
+          this.smoothedPosition.x * (1 - this.alpha) +
+          rawPosition.x * this.alpha,
+        y:
+          this.smoothedPosition.y * (1 - this.alpha) +
+          rawPosition.y * this.alpha,
+      };
+    }
+    return this.smoothedPosition;
+  }
+
+  reset() {
+    this.smoothedPosition = null;
+  }
+}
+
+// Deadzone filter - only returns value if change exceeds threshold
+function applyDeadzone(current, previous, threshold) {
+  if (previous === null || previous === undefined) {
+    return current;
+  }
+  const change = Math.abs(current - previous);
+  if (change < threshold) {
+    return previous; // Return previous value if change is too small
+  }
+  return current;
+}
+
+// Deadzone filter for position objects
+function applyPositionDeadzone(current, previous, threshold) {
+  if (!previous || previous.x === undefined || previous.y === undefined) {
+    return current;
+  }
+  const deltaX = Math.abs(current.x - previous.x);
+  const deltaY = Math.abs(current.y - previous.y);
+  if (deltaX < threshold && deltaY < threshold) {
+    return previous; // Return previous value if change is too small
+  }
+  return current;
+}
+
+export default function FaceDetectionOverlay({
+  onEyePositionChange,
+  onEyeDistanceChange,
+}) {
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
   const [isDetecting, setIsDetecting] = useState(false);
@@ -9,8 +87,17 @@ export default function FaceDetectionOverlay({ onEyePositionChange }) {
   const isDetectingRef = useRef(false);
   const lastLandmarksRef = useRef(null);
   const lastEyePositionRef = useRef({ x: 0, y: 0 });
+  const lastEyeDistanceRef = useRef(null);
   const canvasSizeInitializedRef = useRef(false);
   const detectionOptionsRef = useRef(null);
+
+  // Smoothing filters
+  const smoothZoomRef = useRef(new SmoothZoom(0.1));
+  const smoothPositionRef = useRef(new SmoothPosition(0.1));
+
+  // Deadzone thresholds
+  const distanceDeadzoneThreshold = 0.001; // Threshold for normalized distance (0-1 range)
+  const positionDeadzoneThreshold = 0.005; // Threshold for normalized position (-1 to 1 range)
 
   useEffect(() => {
     // Load face-api models
@@ -39,6 +126,8 @@ export default function FaceDetectionOverlay({ onEyePositionChange }) {
           video: {
             width: { ideal: 1280 },
             height: { ideal: 720 },
+            // width: { ideal: 640 }, // Reduced from 1280 for faster processing
+            // height: { ideal: 480 }, // Reduced from 720 for faster processing
             frameRate: { ideal: 30 },
             facingMode: "user",
           },
@@ -118,11 +207,11 @@ export default function FaceDetectionOverlay({ onEyePositionChange }) {
       let lastVideoHeight = 0;
       let dims = null;
 
-      // Initialize detection options once
+      // Initialize detection options once - optimized for speed
       if (!detectionOptionsRef.current) {
         detectionOptionsRef.current = new faceapi.TinyFaceDetectorOptions({
-          inputSize: 320,
-          scoreThreshold: 0.5,
+          inputSize: 224, // Reduced from 320 for faster detection (224 is still accurate)
+          scoreThreshold: 0.6, // Slightly lower threshold for faster processing
         });
       }
 
@@ -158,6 +247,10 @@ export default function FaceDetectionOverlay({ onEyePositionChange }) {
       // Initialize canvas size once at start
       updateCanvasSize();
 
+      // Frame skipping for performance - detect every N frames
+      let frameSkipCounter = 0;
+      const FRAME_SKIP = 1; // Set to 1 for no skipping, 2 for every other frame, etc.
+
       const detect = async () => {
         if (
           !video ||
@@ -166,6 +259,28 @@ export default function FaceDetectionOverlay({ onEyePositionChange }) {
           !isDetectingRef.current
         )
           return;
+
+        // Frame skipping: only detect every FRAME_SKIP frames
+        frameSkipCounter++;
+        if (frameSkipCounter < FRAME_SKIP) {
+          // Still draw previous landmarks if available for smooth rendering
+          if (lastLandmarksRef.current) {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            const drawResult = drawEyeLandmarks(ctx, lastLandmarksRef.current);
+            if (drawResult && drawResult.midPoint) {
+              updateEyePosition(drawResult.midPoint);
+              if (drawResult.distance !== undefined) {
+                updateEyeDistance(drawResult.distance);
+              }
+            }
+          }
+          // Continue loop immediately without detection
+          if (isDetectingRef.current) {
+            animationFrameId = requestAnimationFrame(detect);
+          }
+          return;
+        }
+        frameSkipCounter = 0;
 
         isDetectingFrame = true;
 
@@ -198,17 +313,26 @@ export default function FaceDetectionOverlay({ onEyePositionChange }) {
             lastLandmarksRef.current = resizedResult.landmarks;
 
             // Draw eye landmarks
-            const midPoint = drawEyeLandmarks(ctx, resizedResult.landmarks);
-            if (midPoint) {
-              updateEyePosition(midPoint);
+            const drawResult = drawEyeLandmarks(ctx, resizedResult.landmarks);
+            if (drawResult && drawResult.midPoint) {
+              updateEyePosition(drawResult.midPoint);
+              if (drawResult.distance !== undefined) {
+                updateEyeDistance(drawResult.distance);
+              }
             }
           } else if (lastLandmarksRef.current) {
             // If no face detected but we have previous landmarks, redraw them
             // This prevents flashing when detection temporarily fails
-            const midPoint = drawEyeLandmarks(ctx, lastLandmarksRef.current);
-            if (midPoint) {
-              updateEyePosition(midPoint);
+            const drawResult = drawEyeLandmarks(ctx, lastLandmarksRef.current);
+            if (drawResult && drawResult.midPoint) {
+              updateEyePosition(drawResult.midPoint);
+              if (drawResult.distance !== undefined) {
+                updateEyeDistance(drawResult.distance);
+              }
             }
+          } else {
+            // No face detected and no previous landmarks - reset distance
+            updateEyeDistance(null);
           }
         } catch (error) {
           console.error("Detection error:", error);
@@ -217,11 +341,9 @@ export default function FaceDetectionOverlay({ onEyePositionChange }) {
         }
 
         // Continue detection loop using requestAnimationFrame for smoother updates
+        // Removed setTimeout delay for maximum FPS
         if (isDetectingRef.current) {
-          animationFrameId = requestAnimationFrame(() => {
-            // Add a small delay to prevent overwhelming the system
-            setTimeout(detect, 50);
-          });
+          animationFrameId = requestAnimationFrame(detect);
         }
       };
 
@@ -243,9 +365,14 @@ export default function FaceDetectionOverlay({ onEyePositionChange }) {
       lastLandmarksRef.current = null;
       canvasSizeInitializedRef.current = false;
       lastEyePositionRef.current = { x: 0, y: 0 };
+      lastEyeDistanceRef.current = null;
+      // Reset smoothing filters
+      smoothZoomRef.current.reset();
+      smoothPositionRef.current.reset();
       if (onEyePositionChange) {
         onEyePositionChange({ x: 0, y: 0 });
       }
+      updateEyeDistance(null);
     }
 
     return () => {
@@ -253,7 +380,7 @@ export default function FaceDetectionOverlay({ onEyePositionChange }) {
         detectionIntervalRef.current.cancel();
       }
     };
-  }, [modelsLoaded, isDetecting, onEyePositionChange]);
+  }, [modelsLoaded, isDetecting, onEyePositionChange, onEyeDistanceChange]);
 
   const updateEyePosition = (midPoint) => {
     if (!canvasRef.current) return;
@@ -261,20 +388,57 @@ export default function FaceDetectionOverlay({ onEyePositionChange }) {
     const { width, height } = canvasRef.current;
     if (!width || !height) return;
 
-    const normalized = {
+    const rawNormalized = {
       x: Math.max(-1, Math.min(1, (midPoint.x / width - 0.5) * 2)),
       y: Math.max(-1, Math.min(1, (0.5 - midPoint.y / height) * 2)),
     };
 
+    // Apply low pass filter
+    const smoothed = smoothPositionRef.current.update(rawNormalized);
+
+    // Apply deadzone filter
     const previous = lastEyePositionRef.current;
-    const hasMeaningfulChange =
-      Math.abs(normalized.x - previous.x) > 0.01 ||
-      Math.abs(normalized.y - previous.y) > 0.01;
+    const afterDeadzone = applyPositionDeadzone(
+      smoothed,
+      previous,
+      positionDeadzoneThreshold
+    );
 
-    lastEyePositionRef.current = normalized;
+    lastEyePositionRef.current = afterDeadzone;
 
-    if (hasMeaningfulChange && onEyePositionChange) {
-      onEyePositionChange(normalized);
+    // Only update if there's a meaningful change after all filtering
+    if (onEyePositionChange) {
+      onEyePositionChange(afterDeadzone);
+    }
+  };
+
+  const updateEyeDistance = (rawDistance) => {
+    if (rawDistance === null || rawDistance === undefined) {
+      // Reset filters when no face detected
+      smoothZoomRef.current.reset();
+      lastEyeDistanceRef.current = null;
+      if (onEyeDistanceChange) {
+        onEyeDistanceChange(null);
+      }
+      return;
+    }
+
+    // Apply low pass filter
+    const smoothed = smoothZoomRef.current.update(rawDistance);
+
+    // Apply deadzone filter
+    const previous = lastEyeDistanceRef.current;
+    const afterDeadzone = applyDeadzone(
+      smoothed,
+      previous,
+      distanceDeadzoneThreshold
+    );
+
+    lastEyeDistanceRef.current = afterDeadzone;
+
+    // Update callback with filtered value
+    if (onEyeDistanceChange) {
+      onEyeDistanceChange(afterDeadzone);
     }
   };
 
@@ -301,13 +465,90 @@ export default function FaceDetectionOverlay({ onEyePositionChange }) {
       y: (leftEyeCenter.y + rightEyeCenter.y) / 2,
     };
 
-    // Mirror the point horizontally so movement matches the mirrored video feed
+    // Mirror the points horizontally so movement matches the mirrored video feed
+    const canvasWidth = ctx.canvas.width || 0;
+    const mirroredLeftEye = {
+      x: canvasWidth - leftEyeCenter.x,
+      y: leftEyeCenter.y,
+    };
+    const mirroredRightEye = {
+      x: canvasWidth - rightEyeCenter.x,
+      y: rightEyeCenter.y,
+    };
     const mirroredPoint = {
-      x: ctx.canvas.width ? ctx.canvas.width - midPoint.x : midPoint.x,
+      x: canvasWidth - midPoint.x,
       y: midPoint.y,
     };
 
-    // Draw a single marker for the midpoint between both eyes
+    // Calculate distance between eyes in pixels
+    const eyeDistancePx = Math.sqrt(
+      Math.pow(mirroredRightEye.x - mirroredLeftEye.x, 2) +
+        Math.pow(mirroredRightEye.y - mirroredLeftEye.y, 2)
+    );
+
+    // Normalize distance by canvas diagonal for consistency across resolutions
+    // This makes the measurement device-independent
+    const canvasHeight = ctx.canvas.height || 1;
+    const canvasDiagonal = Math.sqrt(
+      Math.pow(canvasWidth, 2) + Math.pow(canvasHeight, 2)
+    );
+    const normalizedDistance = eyeDistancePx / canvasDiagonal;
+
+    // Draw line between the two eyes
+    ctx.strokeStyle = "#00ffff";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(mirroredLeftEye.x, mirroredLeftEye.y);
+    ctx.lineTo(mirroredRightEye.x, mirroredRightEye.y);
+    ctx.stroke();
+
+    // Draw distance label near the midpoint
+    ctx.fillStyle = "#00ffff";
+    ctx.font = "bold 16px Arial";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    // Display normalized distance (0-1 range, typically 0.05-0.15 for eyes)
+    const distanceText = normalizedDistance.toFixed(3);
+    const textMetrics = ctx.measureText(distanceText);
+    const textWidth = textMetrics.width;
+    const textHeight = 20;
+    const padding = 6;
+    const bgX = mirroredPoint.x - textWidth / 2 - padding;
+    const bgY = mirroredPoint.y - 25;
+    const bgWidth = textWidth + padding * 2;
+    const bgHeight = textHeight + padding * 2;
+
+    // Draw background rectangle
+    ctx.fillStyle = "rgba(0, 0, 0, 0.6)";
+    ctx.fillRect(bgX, bgY, bgWidth, bgHeight);
+
+    // Draw distance text
+    ctx.fillStyle = "#00ffff";
+    ctx.fillText(distanceText, mirroredPoint.x, mirroredPoint.y - 15);
+
+    // Draw left eye marker
+    ctx.beginPath();
+    ctx.arc(mirroredLeftEye.x, mirroredLeftEye.y, 10, 0, 2 * Math.PI);
+    ctx.fillStyle = "rgba(0, 255, 0, 0.35)";
+    ctx.fill();
+
+    ctx.beginPath();
+    ctx.arc(mirroredLeftEye.x, mirroredLeftEye.y, 4, 0, 2 * Math.PI);
+    ctx.fillStyle = "#00ff00";
+    ctx.fill();
+
+    // Draw right eye marker
+    ctx.beginPath();
+    ctx.arc(mirroredRightEye.x, mirroredRightEye.y, 10, 0, 2 * Math.PI);
+    ctx.fillStyle = "rgba(255, 0, 0, 0.35)";
+    ctx.fill();
+
+    ctx.beginPath();
+    ctx.arc(mirroredRightEye.x, mirroredRightEye.y, 4, 0, 2 * Math.PI);
+    ctx.fillStyle = "#ff0000";
+    ctx.fill();
+
+    // Draw midpoint marker (existing functionality)
     ctx.beginPath();
     ctx.arc(mirroredPoint.x, mirroredPoint.y, 12, 0, 2 * Math.PI);
     ctx.fillStyle = "rgba(0, 255, 255, 0.35)";
@@ -318,7 +559,7 @@ export default function FaceDetectionOverlay({ onEyePositionChange }) {
     ctx.fillStyle = "#00ffff";
     ctx.fill();
 
-    // Crosshair lines for clarity
+    // Crosshair lines for midpoint clarity
     ctx.strokeStyle = "#00ffff";
     ctx.lineWidth = 2;
     ctx.beginPath();
@@ -328,7 +569,7 @@ export default function FaceDetectionOverlay({ onEyePositionChange }) {
     ctx.lineTo(mirroredPoint.x, mirroredPoint.y + 15);
     ctx.stroke();
 
-    return mirroredPoint;
+    return { midPoint: mirroredPoint, distance: normalizedDistance };
   };
 
   return (

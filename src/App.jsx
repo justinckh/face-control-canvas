@@ -4,11 +4,19 @@ import {
   OrbitControls,
   Environment,
 } from "@react-three/drei";
-import { Suspense, useCallback, useMemo, useRef, useState } from "react";
+import {
+  Suspense,
+  useCallback,
+  useMemo,
+  useRef,
+  useState,
+  useEffect,
+} from "react";
 import { MathUtils, Vector3 } from "three";
 import RingStandModel from "./components/RingStandModel";
 import Ps5Model from "./components/Ps5.jsx";
 import FaceDetectionOverlay from "./components/FaceDetectionOverlay";
+import PS5Window from "./components/PS5Window";
 
 function CameraFollower({
   target,
@@ -19,10 +27,19 @@ function CameraFollower({
   offsetXRange = [-3.5, 3.5],
   offsetYRange = [-3.5, 3.5],
   damping = 0.02,
-  zoom = 5,
+  targetZoom = 5,
+  zoomDamping = 0.05,
 }) {
   const { camera } = useThree();
   const lerpTarget = useRef(new Vector3());
+  const currentZoomRef = useRef(targetZoom);
+  const isInitializedRef = useRef(false);
+
+  // Initialize currentZoomRef on first render or when targetZoom changes significantly
+  if (!isInitializedRef.current) {
+    currentZoomRef.current = targetZoom;
+    isInitializedRef.current = true;
+  }
 
   useFrame(() => {
     const scaledX = (target?.x ?? 0) * camScaleX;
@@ -30,6 +47,11 @@ function CameraFollower({
 
     const targetX = MathUtils.clamp(scaledX, offsetXRange[0], offsetXRange[1]);
     const targetY = MathUtils.clamp(scaledY, offsetYRange[0], offsetYRange[1]);
+
+    // Smooth zoom transition
+    currentZoomRef.current +=
+      (targetZoom - currentZoomRef.current) * zoomDamping;
+    const zoom = currentZoomRef.current;
 
     camera.position.x += (targetX - camera.position.x) * damping;
     camera.position.y += (targetY - camera.position.y) * damping;
@@ -48,7 +70,7 @@ function CameraFollower({
 
 function App() {
   const [eyeTarget, setEyeTarget] = useState({ x: 0, y: 0 });
-  const [zoom, setZoom] = useState(5);
+  const [eyeDistance, setEyeDistance] = useState(null);
   const minZoom = useMemo(() => 3, []);
   const maxZoom = useMemo(() => 12, []);
   const mode = useMemo(() => "presentation", []); // change to "orbit" to enable OrbitControls
@@ -56,21 +78,39 @@ function App() {
   const orbitControlsRef = useRef(null);
   const containerRef = useRef(null);
 
-  const handleWheel = useCallback(
-    (event) => {
-      event.preventDefault();
-      event.stopPropagation();
+  // Eye distance range: 0.07 (far) -> maxZoom, 0.12 (close) -> minZoom
+  const minDistance = 0.07;
+  const maxDistance = 0.12;
 
-      const delta = event.deltaY * 0.01;
-      setZoom((current) => MathUtils.clamp(current + delta, minZoom, maxZoom));
-    },
-    [maxZoom, minZoom]
-  );
+  // Calculate target zoom based on eye distance
+  const targetZoom = useMemo(() => {
+    if (eyeDistance === null || eyeDistance === undefined) {
+      // Default zoom when no face detected
+      return (minZoom + maxZoom) / 2;
+    }
 
+    // Clamp distance to valid range
+    const clampedDistance = MathUtils.clamp(
+      eyeDistance,
+      minDistance,
+      maxDistance
+    );
+
+    // Map distance to zoom: closer (higher distance) = lower zoom, farther (lower distance) = higher zoom
+    // Inverse relationship: distance 0.12 -> minZoom, distance 0.07 -> maxZoom
+    const normalized =
+      (clampedDistance - minDistance) / (maxDistance - minDistance);
+    const calculatedZoom = MathUtils.lerp(maxZoom, minZoom, normalized);
+
+    return calculatedZoom;
+  }, [eyeDistance, minZoom, maxZoom, minDistance, maxDistance]);
+
+  // Use targetZoom for calculating zoomRatio (for camScale and offset calculations)
+  // The actual smooth zoom is handled in CameraFollower
   const zoomRatio = useMemo(() => {
     if (maxZoom === minZoom) return 0;
-    return MathUtils.clamp((zoom - minZoom) / (maxZoom - minZoom), 0, 1);
-  }, [maxZoom, minZoom, zoom]);
+    return MathUtils.clamp((targetZoom - minZoom) / (maxZoom - minZoom), 0, 1);
+  }, [maxZoom, minZoom, targetZoom]);
 
   const camScaleX = useMemo(
     () => MathUtils.lerp(2.5, 6.0, zoomRatio),
@@ -99,7 +139,6 @@ function App() {
   return (
     <div
       ref={containerRef}
-      onWheel={handleWheel}
       style={{
         width: "100vw",
         height: "100vh",
@@ -122,7 +161,8 @@ function App() {
             camScaleY={camScaleY}
             offsetXRange={offsetXRange}
             offsetYRange={offsetYRange}
-            zoom={zoom}
+            targetZoom={targetZoom}
+            zoomDamping={0.05}
           />
           <ambientLight intensity={0.5} />
           <directionalLight position={[10, 10, 5]} intensity={1} />
@@ -168,7 +208,11 @@ function App() {
           <Environment preset="sunset" />
         </Suspense>
       </Canvas>
-      <FaceDetectionOverlay onEyePositionChange={setEyeTarget} />
+      <FaceDetectionOverlay
+        onEyePositionChange={setEyeTarget}
+        onEyeDistanceChange={setEyeDistance}
+      />
+      <PS5Window />
     </div>
   );
 }
