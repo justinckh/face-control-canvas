@@ -3,7 +3,6 @@ import {
   PresentationControls,
   OrbitControls,
   Environment,
-  Box,
 } from "@react-three/drei";
 import {
   Suspense,
@@ -13,9 +12,11 @@ import {
   useState,
   useEffect,
 } from "react";
-import { MathUtils, Vector3, FogExp2 } from "three";
-import BoxModel from "./components/BoxModel";
+import { MathUtils, Vector3 } from "three";
+import RingStandModel from "./components/RingStandModel";
+import Ps5Model from "./components/Ps5.jsx";
 import FaceDetectionOverlay from "./components/FaceDetectionOverlay";
+import PS5Window from "./components/PS5Window";
 
 function CameraFollower({
   target,
@@ -55,7 +56,7 @@ function CameraFollower({
     camera.position.x += (targetX - camera.position.x) * damping;
     camera.position.y += (targetY - camera.position.y) * damping;
     camera.position.z += (zoom - camera.position.z) * damping;
-    camera.lookAt(0, 0, -8);
+    camera.lookAt(0, 0, 0);
 
     if (mode === "orbit" && orbitControlsRef?.current) {
       const controls = orbitControlsRef.current;
@@ -112,7 +113,7 @@ function App() {
   }, [maxZoom, minZoom, targetZoom]);
 
   const camScaleX = useMemo(
-    () => MathUtils.lerp(2.5, 20.0, zoomRatio),
+    () => MathUtils.lerp(2.5, 6.0, zoomRatio),
     [zoomRatio]
   );
   const camScaleY = useMemo(
@@ -128,8 +129,8 @@ function App() {
     ];
   }, [zoomRatio]);
   const offsetYRange = useMemo(() => {
-    const nearRange = [-1.0, 1.0];
-    const farRange = [-2, 2];
+    const nearRange = [-1.0, 7.0];
+    const farRange = [-3.2, 3.4];
     return [
       MathUtils.lerp(nearRange[0], farRange[0], zoomRatio),
       MathUtils.lerp(nearRange[1], farRange[1], zoomRatio),
@@ -151,7 +152,6 @@ function App() {
         camera={{ position: [0, 0, 5], fov: 50 }}
         style={{ background: "#1a1a1a" }}
       >
-        <fogExp2 attach="fog" args={["#1a1a1a", 0.07]} />
         <Suspense fallback={null}>
           <CameraFollower
             target={eyeTarget}
@@ -170,28 +170,32 @@ function App() {
           {usePresentationMode ? (
             <PresentationControls
               global
-              config={{ mass: 1, tension: -200 }}
+              config={{ mass: 1, tension: 280 }}
               polar={[-Math.PI / 12, Math.PI / 2]}
               azimuth={[-Infinity, Infinity]}
               cursor={false}
               damping={0.05}
-              snap={true}
               speed={2.0}
+              snap={true}
             >
-              <BoxModel
-                scale={[5, 3, 3]}
-                position={[0, 0, -8]}
-                rotation={[0, Math.PI / 2, 0]}
+              <RingStandModel
+                scale={[0.25, 0.18, 0.18]}
+                position={[0, -3.5, 0]}
+                rotation={[0, 0, 0]}
+              />
+              <Ps5Model
+                scale={20}
+                position={[0.2, -1, -0.3]}
+                rotation={[Math.PI / 2, 0, 0]}
               />
             </PresentationControls>
           ) : (
             <>
-              <BoxModel
-                scale={[5, 3, 3]}
-                position={[0, 0, -8]}
-                rotation={[0, Math.PI / 2, 0]}
+              <RingStandModel
+                scale={0.03}
+                position={[0, -1, 0]}
+                rotation={[0, 0.5, 0]}
               />
-              <Box position={[0, 0, -100]}></Box>
               <OrbitControls
                 ref={orbitControlsRef}
                 enablePan={true}
@@ -202,13 +206,14 @@ function App() {
               />
             </>
           )}
-          <Environment preset="sunset" environmentIntensity={1} />
+          <Environment preset="sunset" />
         </Suspense>
       </Canvas>
       <FaceDetectionOverlay
         onEyePositionChange={setEyeTarget}
         onEyeDistanceChange={setEyeDistance}
       />
+      <PS5Window />
     </div>
   );
 }
