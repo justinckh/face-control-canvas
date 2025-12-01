@@ -40,7 +40,7 @@ function AppSwitcher() {
           e.target.style.transform = "scale(1)";
         }}
       >
-        Switch Model ({currentApp === "App" ? "Box" : "PS5"})
+        Switch Model
       </button>
       {currentApp === "App" ? <App /> : <App1 />}
     </>
